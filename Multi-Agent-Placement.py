@@ -1,5 +1,7 @@
 import os
 import sys
+import tempfile
+from pathlib import Path
 from types import ModuleType
 
 # Mock chromadb to avoid Pydantic V1 type-inference compatibility issues in Python 3.14+
@@ -48,7 +50,6 @@ import crewai.llms.cache as _crewai_cache
 # Monkey-patch to prevent injection of unsupported cache_breakpoint parameter
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
-import tempfile
 import asyncio
 import pdfplumber
 import streamlit as st
@@ -70,9 +71,16 @@ except Exception:
     loop = asyncio.get_event_loop()
 
 
+def get_temp_storage_dir():
+    storage_dir = Path(tempfile.gettempdir()) / "resume_interview_prep"
+    storage_dir.mkdir(exist_ok=True)
+    return storage_dir
+
+
 def save_uploaded_file(uploaded_file):
     suffix = os.path.splitext(uploaded_file.name)[1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    storage_dir = get_temp_storage_dir()
+    with tempfile.NamedTemporaryFile(dir=storage_dir, delete=False, suffix=suffix) as tmp:
         tmp.write(uploaded_file.getvalue())
         return tmp.name
 
@@ -945,12 +953,12 @@ Role: {job_role}
 
     st.text_area("Full Compiled Report Preview (generated modules only)", combined_report, height=350)
     
-    report_path = "Interview_Preparation_Report.txt"
+    report_path = get_temp_storage_dir() / "Interview_Preparation_Report.txt"
     try:
         with open(report_path, "w", encoding="utf-8") as f:
             f.write(combined_report)
     except Exception:
-        pass
+        report_path = None
         
     col1, col2 = st.columns(2)
     with col1:
@@ -971,7 +979,10 @@ Role: {job_role}
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
-    st.success("Combined report saved locally as Interview_Preparation_Report.txt")
+    if report_path:
+        st.success(f"Combined report saved to {report_path}")
+    else:
+        st.success("Combined report generated successfully. Use the download button to save it.")
 else:
     st.info("No reports generated yet. Click 'Auto-Generate (Step-by-Step)' above or generate individual modules separately.")
 
