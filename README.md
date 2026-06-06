@@ -2,6 +2,10 @@
 
 An interactive, AI-powered multi-agent web application built with **Streamlit** and **CrewAI** that automates the process of tailoring your resume and preparing for interviews. By uploading a resume (PDF/DOCX) and entering a target role, company name, and job description, the assistant deploys a team of specialized AI agents to analyze, research, and coach you to success.
 
+## 🌐 Deployment Link
+
+Public Streamlit deployment: https://multi-agent-interview-preparation.streamlit.app/
+
 ---
 
 ## 🛠️ Required Libraries & Ecosystem
