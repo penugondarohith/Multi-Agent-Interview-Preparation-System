@@ -1,4 +1,45 @@
 import os
+import sys
+from types import ModuleType
+
+# Mock chromadb to avoid Pydantic V1 type-inference compatibility issues in Python 3.14+
+class DummyBase:
+    def __class_getitem__(cls, item):
+        return cls
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        from pydantic_core import core_schema
+        return core_schema.any_schema()
+
+class MockModule(ModuleType):
+    def __init__(self, name):
+        super().__init__(name)
+        self.__path__ = []
+
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+        class DynamicMockClass(DummyBase):
+            pass
+        DynamicMockClass.__name__ = name
+        return DynamicMockClass
+
+class ChromadbMockFinder:
+    def find_spec(self, fullname, path, target=None):
+        if fullname.startswith('chromadb'):
+            from importlib.machinery import ModuleSpec
+            return ModuleSpec(fullname, self)
+        return None
+
+    def create_module(self, spec):
+        return MockModule(spec.name)
+
+    def exec_module(self, module):
+        pass
+
+sys.meta_path.insert(0, ChromadbMockFinder())
+
 # Disable telemetry and OpenTelemetry tracer overrides before other imports to prevent crashes on subsequent runs
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
@@ -8,7 +49,7 @@ import crewai.llms.cache as _crewai_cache
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg
 
 import tempfile
-import nest_asyncio
+import asyncio
 import pdfplumber
 import streamlit as st
 import time
@@ -16,7 +57,18 @@ from docx import Document
 from crewai import Agent, Task, Crew, LLM
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-nest_asyncio.apply()
+# Force standard asyncio event loop policy to avoid issues with uvloop on Streamlit Cloud (Linux)
+try:
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+except Exception:
+    pass
+
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+except Exception:
+    loop = asyncio.get_event_loop()
+
 
 def save_uploaded_file(uploaded_file):
     suffix = os.path.splitext(uploaded_file.name)[1]
