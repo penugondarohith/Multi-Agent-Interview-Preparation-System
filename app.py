@@ -47,7 +47,11 @@ os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
 import nest_asyncio
-nest_asyncio.apply()
+try:
+    nest_asyncio.apply()
+except ValueError:
+    # Some Streamlit deployment environments use an event loop type that nest_asyncio cannot patch.
+    pass
 
 import crewai.llms.cache as _crewai_cache
 # Monkey-patch to prevent injection of unsupported cache_breakpoint parameter
