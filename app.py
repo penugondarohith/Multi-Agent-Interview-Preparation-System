@@ -46,6 +46,9 @@ sys.meta_path.insert(0, ChromadbMockFinder())
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
+import nest_asyncio
+nest_asyncio.apply()
+
 import crewai.llms.cache as _crewai_cache
 # Monkey-patch to prevent injection of unsupported cache_breakpoint parameter
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg

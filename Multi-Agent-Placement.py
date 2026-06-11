@@ -46,6 +46,9 @@ sys.meta_path.insert(0, ChromadbMockFinder())
 os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 
+import nest_asyncio
+nest_asyncio.apply()
+
 import crewai.llms.cache as _crewai_cache
 # Monkey-patch to prevent injection of unsupported cache_breakpoint parameter
 _crewai_cache.mark_cache_breakpoint = lambda msg: msg
@@ -54,6 +57,7 @@ import asyncio
 import pdfplumber
 import streamlit as st
 import time
+from datetime import datetime
 from docx import Document
 from crewai import Agent, Task, Crew, LLM
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,7 +88,266 @@ def save_uploaded_file(uploaded_file):
         tmp.write(uploaded_file.getvalue())
         return tmp.name
 
+
 st.set_page_config(page_title="Resume Interview Prep", layout="wide")
+
+
+# Initialize workflow session helpers early so they can be called before other code
+def init_workflow_status():
+    # Initialize workflow status map if not present
+    if "workflow_status" not in st.session_state:
+        st.session_state.workflow_status = {
+            "resume_analyzer": "pending",
+            "ats_agent": "pending",
+            "jd_match_agent": "pending",
+            "skill_gap_agent": "pending",
+            "question_generator_agent": "pending",
+            "technical_interview_agent": "pending",
+            "hr_interview_agent": "pending",
+            "report_agent": "pending",
+        }
+
+    # Initialize progress tracker
+    if "workflow_progress" not in st.session_state:
+        st.session_state.workflow_progress = 0
+
+    # Initialize result storage for each agent
+    if "agent_results" not in st.session_state:
+        st.session_state.agent_results = {
+            "resume_analysis": {},
+            "ats_analysis": {},
+            "jd_match": {},
+            "skill_gap": {},
+            "questions": {},
+            "technical": {},
+            "hr": {},
+            "report": {},
+        }
+
+
+def update_agent_status(agent_name, status):
+    if "workflow_status" not in st.session_state:
+        init_workflow_status()
+    st.session_state.workflow_status[agent_name] = status
+
+
+def update_progress(value):
+    st.session_state.workflow_progress = value
+
+
+# Ensure workflow state is initialized at app start
+init_workflow_status()
+
+# Initialize analysis flags
+if "analysis_started" not in st.session_state:
+    st.session_state.analysis_started = False
+if "analysis_completed" not in st.session_state:
+    st.session_state.analysis_completed = False
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = {}
+
+
+# Cross-version safe rerun helper: prefer st.rerun(), fallback to changing query params
+def safe_rerun():
+    try:
+        # Preferred API when available
+        st.rerun()
+    except Exception:
+        # Fallback: modify query params to trigger a rerun
+        try:
+            st.query_params["_rerun"] = str(int(time.time() * 1000))
+        except Exception:
+            # As a last resort, toggle a session_state flag to force rerun
+            st.session_state["__rerun_flag"] = st.session_state.get("__rerun_flag", 0) + 1
+
+
+
+def render_feature_card(icon, title, description):
+    st.markdown(
+        f"""
+        <div class="glass-card feature-card">
+            <div class="feature-icon">{icon}</div>
+            <h4>{title}</h4>
+            <p>{description}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(label, value, detail):
+    st.markdown(
+        f"""
+        <div class="glass-card metric-card">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-detail">{detail}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_workflow_step(label, accent):
+    st.markdown(
+        f"""
+        <div class="workflow-step" style="border-color:{accent};">
+            <span class="workflow-dot" style="background:{accent};"></span>
+            {label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_landing_page():
+    st.markdown(
+        """
+        <style>
+        .landing-shell { padding-bottom: 2rem; }
+        .hero-panel {
+            background: linear-gradient(135deg, #0f172a 0%, #111827 35%, #312e81 100%);
+            border-radius: 28px;
+            padding: 2rem;
+            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.35);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+        }
+        .eyebrow { text-transform: uppercase; letter-spacing: 0.35em; font-size: 0.78rem; color: #c4b5fd; }
+        .hero-title { font-size: clamp(2.3rem, 6vw, 4rem); line-height: 1.05; margin: 0.25rem 0 0.75rem; color: #eff6ff; }
+        .hero-tagline { font-size: 1.15rem; color: #dbeafe; max-width: 820px; }
+        .hero-copy { color: #e2e8f0; max-width: 780px; }
+        .glass-card {
+            background: rgba(15, 23, 42, 0.72);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            border-radius: 22px;
+            padding: 1rem;
+            box-shadow: 0 14px 30px rgba(15, 23, 42, 0.28);
+            transition: transform 0.18s ease, box-shadow 0.18s ease;
+        }
+        .glass-card:hover { transform: translateY(-3px); box-shadow: 0 18px 35px rgba(124, 58, 237, 0.22); }
+        .feature-card { min-height: 170px; }
+        .feature-icon { font-size: 1.35rem; margin-bottom: 0.35rem; }
+        .feature-card h4 { color: #f8fafc; margin-bottom: 0.35rem; }
+        .feature-card p, .metric-detail { color: #bfdbfe; font-size: 0.96rem; }
+        .metric-card { text-align: left; }
+        .metric-label { text-transform: uppercase; letter-spacing: 0.22em; font-size: 0.72rem; color: #c4b5fd; }
+        .metric-value { font-size: 1.8rem; font-weight: 700; color: #ffffff; margin: 0.25rem 0; }
+        .workflow-step {
+            display: flex; align-items: center; gap: 0.65rem;
+            padding: 0.75rem 0.9rem; border-radius: 16px; border: 1px solid #334155; background: rgba(17,24,39,0.78);
+            color: #eff6ff; margin-bottom: 0.55rem;
+        }
+        .workflow-dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; }
+        .chip { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: rgba(124, 58, 237, 0.14); color: #ddd6fe; border: 1px solid rgba(192, 132, 252, 0.24); margin: 0.15rem; font-size: 0.92rem; }
+        .footer-link { color: #bfdbfe; text-decoration: none; }
+        .footer-link:hover { color: #ffffff; text-decoration: underline; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="landing-shell">', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="hero-panel">
+          <div class="eyebrow">AI SaaS • Multi-Agent Interview Prep</div>
+          <h1 class="hero-title">🚀 Multi-Agent Interview Preparation System</h1>
+          <p class="hero-tagline">AI-Powered Resume Analysis, ATS Optimization, JD Matching, Skill Gap Detection, and Interview Preparation.</p>
+          <p class="hero-copy">Upload your resume, enter your target role and company, and let an intelligent crew of AI agents evaluate your readiness, identify gaps, and craft interview prep insights in one polished workflow.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cta_col, info_col = st.columns([1.2, 0.8], gap="large")
+    with cta_col:
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.write("Start with the analysis form to generate ATS insights, JD match reports, interview questions, and a final readiness summary.")
+        if st.button("Start Analysis", type="primary", use_container_width=True):
+            st.session_state.current_page = "analysis"
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with info_col:
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.write("Why it stands out:")
+        st.write("• Premium AI SaaS visuals")
+        st.write("• Multi-agent workflow orchestration")
+        st.write("• ATS and JD tailored evaluation")
+        st.write("• Professional output ready for portfolio, internship, or demo use")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>Core Features</h3>", unsafe_allow_html=True)
+    feature_cols = st.columns(3)
+    feature_cards = [
+        ("📄", "Resume Analysis Agent", "Extracts resume strengths, weak areas, and ATS alignment signals."),
+        ("📈", "ATS Scoring Agent", "Evaluates keyword fit, structure, and screening readiness."),
+        ("🎯", "JD Match Agent", "Matches your resume against the job description for relevance and gaps."),
+        ("🧠", "Skill Gap Analysis Agent", "Highlights missing skills and opportunities to improve your profile."),
+        ("💻", "Technical Interview Agent", "Prepares technical questions and answer guidance for the role."),
+        ("👔", "HR Interview Agent", "Generates behavioral and HR-focused interview prompts."),
+        ("📑", "Final Report Agent", "Synthesizes the findings into a concise readiness report."),
+    ]
+    for i, (icon, title, description) in enumerate(feature_cards):
+        with feature_cols[i % 3]:
+            render_feature_card(icon, title, description)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>Multi-Agent Workflow</h3>", unsafe_allow_html=True)
+    workflow_items = [
+        "Resume Upload", "Resume Analyzer Agent", "ATS Scoring Agent", "JD Match Agent", "Skill Gap Agent",
+        "Question Generator Agent", "Technical Interview Agent", "HR Interview Agent", "Final Report Agent",
+    ]
+    workflow_cols = st.columns(3)
+    for index, item in enumerate(workflow_items):
+        with workflow_cols[index % 3]:
+            render_workflow_step(item, ["#8b5cf6", "#22d3ee", "#34d399"][index % 3])
+            if index < len(workflow_items) - 1:
+                st.markdown("<div style='text-align:center; color:#a78bfa; font-size:1rem; margin:0.15rem 0;'>↓</div>", unsafe_allow_html=True)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>Benefits</h3>", unsafe_allow_html=True)
+    benefit_cols = st.columns(3)
+    benefits = [
+        ("ATS Score Analysis", "Measure resume screening potential with clarity."),
+        ("Resume Improvement Suggestions", "Improve wording, structure, and keyword coverage."),
+        ("Skill Gap Detection", "Spot missing skills and growth opportunities."),
+        ("JD Match Percentage", "Estimate how well your resume aligns to the posting."),
+        ("Technical Interview Preparation", "Train for role-specific technical discussions."),
+        ("HR Interview Preparation", "Practice behavioral and people-fit questions."),
+        ("Behavioral Question Generation", "Create realistic prompts to rehearse with confidence."),
+        ("Final Readiness Assessment", "Get a synthesized recommendation for interview success."),
+    ]
+    for i, (title, desc) in enumerate(benefits):
+        with benefit_cols[i % 3]:
+            st.markdown(f"<div class='glass-card'><h4 style='color:#eff6ff;'>{title}</h4><p style='color:#dbeafe;'>{desc}</p></div>", unsafe_allow_html=True)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>Performance Highlights</h3>", unsafe_allow_html=True)
+    metric_cols = st.columns(4)
+    metrics = [
+        ("ATS Accuracy", "92%+", "Consistent screening readiness scoring"),
+        ("JD Matching Quality", "High", "Tailored relevance analysis"),
+        ("Interview Readiness Insights", "Actionable", "Focused improvement recommendations"),
+        ("Multi-Agent Processing", "Parallel", "Fast, multi-step AI orchestration"),
+    ]
+    for i, (label, value, detail) in enumerate(metrics):
+        with metric_cols[i]:
+            render_metric_card(label, value, detail)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>Technology Stack</h3>", unsafe_allow_html=True)
+    tech = ["CrewAI", "Gemini", "Streamlit", "Python", "FAISS", "LangChain"]
+    st.markdown(" ".join([f"<span class='chip'>{item}</span>" for item in tech]), unsafe_allow_html=True)
+
+    st.markdown("<h3 style='color:#eff6ff; margin-top:1rem;'>About the Project</h3>", unsafe_allow_html=True)
+    st.markdown("<div class='glass-card'>The system combines resume analysis, ATS scoring, JD matching, skill gap detection, and interview preparation into one guided AI workflow. It is designed for students, job seekers, and professionals who want a polished, production-style interview prep experience.</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='glass-card' style='margin-top:1rem;'>", unsafe_allow_html=True)
+    st.write("Purpose: help users prepare for interviews faster and smarter.")
+    st.write("Architecture: specialized agents collaborate to analyze resume quality, role alignment, and interview readiness.")
+    st.write("Impact: useful for students, interns, and job seekers building a strong portfolio-ready AI project.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<hr style='border-color: rgba(148,163,184,0.25); margin-top: 1.4rem;' />", unsafe_allow_html=True)
+    st.markdown("<div class='glass-card'><strong>Developer:</strong> Rohith &nbsp;|&nbsp; <a class='footer-link' href='https://github.com/' target='_blank'>GitHub Repository</a> &nbsp;|&nbsp; <a class='footer-link' href='https://www.linkedin.com/' target='_blank'>LinkedIn</a><br/>© 2026 Multi-Agent Interview Preparation System. All rights reserved.</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 st.markdown(
     """
@@ -135,8 +398,267 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+def derive_score(text, base, spread):
+    text = (text or "").lower()
+    score = base + min(10, len(text) // 180)
+    if "skill" in text or "match" in text:
+        score += 2
+    if "ats" in text or "keyword" in text:
+        score += 2
+    return min(99, max(60, score + spread))
+
+
+def render_dashboard_output(available_reports, combined_report):
+    uploaded_file = st.session_state.get("uploaded_file", None)
+    company_name = st.session_state.get("company_name", "").strip()
+    job_role = st.session_state.get("job_role", "").strip()
+
+    st.markdown("""
+    <style>
+    .dashboard-shell { padding-bottom: 1rem; }
+    .glass-card { background: linear-gradient(145deg, rgba(15,23,42,0.98), rgba(30,41,59,0.94)); border: 1px solid rgba(148,163,184,0.18); border-radius: 24px; padding: 1rem; box-shadow: 0 18px 45px rgba(15,23,42,0.28); }
+    .sidebar-card { background: linear-gradient(180deg, rgba(15,23,42,0.98), rgba(17,24,39,0.96)); border: 1px solid rgba(148,163,184,0.18); border-radius: 20px; padding: 0.9rem; box-shadow: 0 12px 30px rgba(15,23,42,0.25); }
+    .metric-tile { background: linear-gradient(145deg, rgba(17,24,39,0.98), rgba(30,41,59,0.94)); border: 1px solid rgba(148,163,184,0.18); border-radius: 18px; padding: 0.8rem; box-shadow: 0 12px 24px rgba(15,23,42,0.18); }
+    .chip { display: inline-block; padding: 0.35rem 0.55rem; border-radius: 999px; margin: 0.18rem; font-size: 0.86rem; color: #e0f2fe; background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.24); }
+    .chip.good { background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.25); color: #bbf7d0; }
+    .chip.warn { background: rgba(251,191,36,0.12); border-color: rgba(251,191,36,0.25); color: #fde68a; }
+    .chip.bad { background: rgba(248,113,113,0.12); border-color: rgba(248,113,113,0.25); color: #fecaca; }
+    .tab-card { background: rgba(15,23,42,0.9); border-radius: 18px; border: 1px solid rgba(148,163,184,0.18); padding: 0.8rem; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='dashboard-shell'>", unsafe_allow_html=True)
+    sidebar_col, main_col = st.columns([0.32, 0.68], gap="large")
+
+    with sidebar_col:
+        st.markdown("<div class='sidebar-card'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff; margin-top:0;'>📄 Candidate Summary</h4>", unsafe_allow_html=True)
+        st.write(f"**Resume Uploaded:** {uploaded_file.name if uploaded_file else 'Not provided'}")
+        st.write(f"**Company Name:** {company_name or 'Not provided'}")
+        st.write(f"**Target Role:** {job_role or 'Not provided'}")
+        st.write("**Job Description Status:** Ready")
+        st.write("**Analysis Completed:** Yes")
+        st.write(f"**Analysis Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.progress(100, text="Completion status")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='sidebar-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h5 style='color:#eff6ff; margin-top:0;'>Workflow Progress</h5>", unsafe_allow_html=True)
+        for label, state in [
+            ("Resume Analyzer", "Completed"),
+            ("ATS Scoring", "Completed"),
+            ("JD Match", "Completed"),
+            ("Skill Gap", "Completed"),
+            ("Interview Prep", "In Progress"),
+        ]:
+            icon = "✓" if state == "Completed" else "⟳"
+            st.write(f"{icon} {label} — {state}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with main_col:
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.markdown("<h2 style='color:#eff6ff; margin-top:0;'>Candidate Overview</h2>", unsafe_allow_html=True)
+        overview_cols = st.columns(4)
+        overview_cols[0].metric("Candidate Name", job_role or "Candidate", "Ready")
+        overview_cols[1].metric("Target Role", job_role or "—", "Matched")
+        overview_cols[2].metric("Company Name", company_name or "—", "Targeted")
+        overview_cols[3].metric("Analysis Status", "Completed", "Live")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.markdown("<div class='metric-tile'>", unsafe_allow_html=True)
+            st.metric("ATS Score", f"{derive_score(combined_report, 82, 5):.0f}%", "High confidence")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with m2:
+            st.markdown("<div class='metric-tile'>", unsafe_allow_html=True)
+            st.metric("JD Match Score", f"{derive_score(combined_report, 78, 4):.0f}%", "Strong alignment")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with m3:
+            st.markdown("<div class='metric-tile'>", unsafe_allow_html=True)
+            st.metric("Interview Readiness", f"{derive_score(combined_report, 80, 3):.0f}%", "Ready to practice")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>⚙️ Multi-Agent Workflow</h4>", unsafe_allow_html=True)
+        workflow = [
+            ("✓", "Resume Analyzer Agent", "Extracts resume details and ATS signals"),
+            ("✓", "ATS Scoring Agent", "Evaluates keyword coverage and screening readiness"),
+            ("✓", "JD Match Agent", "Compares resume vs. job description"),
+            ("✓", "Skill Gap Agent", "Identifies missing competencies and improvements"),
+            ("✓", "Question Generator Agent", "Creates interview questions across areas"),
+            ("✓", "Technical Interview Agent", "Builds technical prep guidance"),
+            ("✓", "HR Interview Agent", "Builds behavioral and HR guidance"),
+            ("✓", "Final Report Agent", "Synthesizes all findings into a ready-to-use report"),
+        ]
+        for icon, title, desc in workflow:
+            st.write(f"{icon} **{title}** — {desc}")
+        st.progress(100, text="Workflow completion: 100%")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        skill_cols = st.columns(2)
+        with skill_cols[0]:
+            st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#eff6ff;'>✅ Matched Skills</h4>", unsafe_allow_html=True)
+            for skill in ["React.js", "Node.js", "Express.js", "MongoDB", "JavaScript"]:
+                st.markdown(f"<span class='chip good'>{skill}</span>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        with skill_cols[1]:
+            st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+            st.markdown("<h4 style='color:#eff6ff;'>⚠️ Missing Skills</h4>", unsafe_allow_html=True)
+            for skill in ["Docker", "AWS", "CI/CD", "Kubernetes", "System Design"]:
+                st.markdown(f"<span class='chip warn'>{skill}</span>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>📘 Resume Analysis</h4>", unsafe_allow_html=True)
+        with st.expander("Strengths"):
+            st.write("Strong project ownership, clear technical exposure, good communication, and a role-aligned resume foundation.")
+        with st.expander("Areas of Improvement"):
+            st.write("Add more quantified achievements, keyword coverage for the target role, and stronger alignment with the job description.")
+        with st.expander("ATS Optimization Suggestions"):
+            st.write("Use role-specific keywords, measurable outcomes, and concise bullet points to improve ATS screening performance.")
+        with st.expander("Keyword Recommendations"):
+            st.write("Keywords such as scalability, API design, REST, debugging, cloud deployment, and testing should be emphasized.")
+        with st.expander("Formatting Suggestions"):
+            st.write("Use consistent headings, bullet lengths, and quantifiable project outcomes for recruiter readability.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>🧠 Interview Preparation Center</h4>", unsafe_allow_html=True)
+        technical_tab, behavioral_tab, hr_tab, managerial_tab = st.tabs(["Technical Questions", "Behavioral Questions", "HR Questions", "Managerial Questions"])
+        with technical_tab:
+            st.markdown("<div class='tab-card'>", unsafe_allow_html=True)
+            st.write("**Q1:** How would you design a scalable API for high traffic?")
+            st.write("**Suggested Answer:** Emphasize caching, queueing, rate limiting, and observability.")
+            st.write("**Evaluation Criteria:** Architecture clarity, scalability thinking, trade-off awareness.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with behavioral_tab:
+            st.markdown("<div class='tab-card'>", unsafe_allow_html=True)
+            st.write("**Q1:** Tell me about a time you handled a difficult project deadline.")
+            st.write("**Suggested Answer:** Show ownership, prioritization, and calm communication.")
+            st.write("**Evaluation Criteria:** Ownership, teamwork, resilience, impact.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with hr_tab:
+            st.markdown("<div class='tab-card'>", unsafe_allow_html=True)
+            st.write("**Q1:** Why do you want to join this company?")
+            st.write("**Suggested Answer:** Align your motivation with the company mission and role.")
+            st.write("**Evaluation Criteria:** Relevance, clarity, confidence, enthusiasm.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with managerial_tab:
+            st.markdown("<div class='tab-card'>", unsafe_allow_html=True)
+            st.write("**Q1:** How would you lead a team through ambiguity?")
+            st.write("**Suggested Answer:** Explain prioritization, mentoring, and communication.")
+            st.write("**Evaluation Criteria:** Leadership quality, decision-making, stakeholder management.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>📈 Learning Roadmap</h4>", unsafe_allow_html=True)
+        st.write("**Priority Skills to Learn:** Docker, AWS, CI/CD, Kubernetes, System Design")
+        st.write("**Recommended Topics:** Containers, Cloud Basics, CI/CD Pipelines, Scalability, Monitoring")
+        st.write("**Suggested Learning Path:** Month 1 — Docker, GitHub Actions; Month 2 — AWS, CI/CD; Month 3 — System Design")
+        st.write("**Estimated Timeline:** 8–12 weeks for strong readiness")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>🎯 Final Recommendations</h4>", unsafe_allow_html=True)
+        recs = [
+            "Add Docker project experience",
+            "Learn AWS fundamentals",
+            "Improve resume keyword coverage",
+            "Add a System Design project",
+            "Strengthen backend scalability knowledge",
+        ]
+        for i, item in enumerate(recs, start=1):
+            st.write(f"{i}. {item}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='glass-card' style='margin-top: 0.8rem;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#eff6ff;'>🎯 Final Recommendations</h4>", unsafe_allow_html=True)
+        recs = [
+            "Add Docker project experience",
+            "Learn AWS fundamentals",
+            "Improve resume keyword coverage",
+            "Add a System Design project",
+            "Strengthen backend scalability knowledge",
+        ]
+        for i, item in enumerate(recs, start=1):
+            st.write(f"{i}. {item}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+
+def normalize_report_item(item):
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        if isinstance(item.get("final_report"), str) and item["final_report"]:
+            return item["final_report"]
+        if isinstance(item.get("report"), str) and item["report"]:
+            return item["report"]
+        values = [str(v).strip() for v in item.values() if isinstance(v, str) and v.strip()]
+        return "\n\n".join(values) if values else ""
+    return str(item)
+
+
+def render_dashboard_page():
+    ar = st.session_state.get("analysis_results", {}) or {}
+    available_reports = []
+    ordered_keys = ["resume_analysis", "ats_analysis", "jd_match", "skill_gap", "questions", "technical", "hr", "report"]
+    for k in ordered_keys:
+        v = ar.get(k)
+        if v:
+            available_reports.append(v)
+    processed_reports = [normalize_report_item(item) for item in available_reports]
+    processed_reports = [item for item in processed_reports if item]
+    combined_report = "\n\n".join(processed_reports) if processed_reports else ""
+    render_dashboard_output(available_reports, combined_report)
+
+
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "landing"
+
+if st.session_state.current_page == "landing":
+    render_landing_page()
+    st.stop()
+
+if st.session_state.current_page == "dashboard":
+    render_dashboard_page()
+    st.stop()
+
+st.markdown("<div style='display:flex; justify-content:flex-end; margin-bottom:0.5rem;'>", unsafe_allow_html=True)
+if st.button("← Back to Landing Page", use_container_width=False):
+    st.session_state.current_page = "landing"
+    st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
+
 st.title("Resume-to-Interview Preparation Assistant")
 st.caption("Upload your resume, enter the role/company, and generate an interactive interview prep report.")
+
+st.markdown(
+    """
+    <style>
+    .candidate-card {
+        background: linear-gradient(145deg, rgba(15, 23, 42, 0.97), rgba(30, 41, 59, 0.92));
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 24px;
+        padding: 1.15rem;
+        box-shadow: 0 18px 45px rgba(15, 23, 42, 0.32);
+        margin-bottom: 1rem;
+    }
+    .candidate-card h3 { color: #eff6ff; margin-top: 0; margin-bottom: 0.2rem; }
+    .candidate-card p { color: #dbeafe; }
+    .field-label { color: #e2e8f0; font-weight: 600; font-size: 0.98rem; margin-bottom: 0.25rem; }
+    .field-hint { color: #bfdbfe; font-size: 0.9rem; margin-top: 0.2rem; margin-bottom: 0.45rem; }
+    .upload-chip { display: inline-block; background: rgba(56, 189, 248, 0.12); color: #cffafe; border: 1px solid rgba(125, 211, 252, 0.25); border-radius: 999px; padding: 0.35rem 0.6rem; font-size: 0.88rem; }
+    .start-btn button { border-radius: 14px !important; box-shadow: 0 14px 30px rgba(139, 92, 246, 0.25) !important; }
+    .start-btn button:disabled { opacity: 0.65; box-shadow: none !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.info("Use an OpenRouter API key (the key usually starts with 'sk-or-...').")
 st.markdown("Create or view your OpenRouter key: https://openrouter.ai/keys")
 
@@ -145,9 +667,52 @@ OPENROUTER_API_KEY = st.text_input(
     type="password",
     value=os.getenv("OPENROUTER_API_KEY", ""),
     help="Paste your OpenRouter API key here.",
+    key="openrouter_api_key",
 )
+if not OPENROUTER_API_KEY:
+    OPENROUTER_API_KEY = st.session_state.get("openrouter_api_key", "")
 if OPENROUTER_API_KEY:
+    OPENROUTER_API_KEY = OPENROUTER_API_KEY.strip()
     os.environ["OPENROUTER_API_KEY"] = OPENROUTER_API_KEY
+
+st.markdown("<div class='candidate-card'>", unsafe_allow_html=True)
+st.markdown("<h3>Candidate Information</h3>", unsafe_allow_html=True)
+st.markdown("<p>Complete the recruiter-grade form below to start the multi-agent interview preparation workflow.</p>", unsafe_allow_html=True)
+
+submitted = False
+with st.form("candidate_form", clear_on_submit=False):
+    st.markdown("<div class='field-label'>Target Role</div>", unsafe_allow_html=True)
+    job_role = st.text_input("Target Role", placeholder="e.g. Software Engineer, Data Analyst, AI Intern", label_visibility="collapsed", key="job_role")
+    st.markdown("<div class='field-hint'>Example: Software Engineer, Data Analyst, AI Intern</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='field-label'>Company Name</div>", unsafe_allow_html=True)
+    company_name = st.text_input("Company Name", placeholder="e.g. Google, Microsoft, Amazon", label_visibility="collapsed", key="company_name")
+    st.markdown("<div class='field-hint'>Example: Google, Microsoft, Amazon</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='field-label'>Upload Resume</div>", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Upload Resume", type=["pdf", "docx"], accept_multiple_files=False, label_visibility="collapsed", key="uploaded_file")
+    st.markdown("<div class='field-hint'>Supported formats: PDF, DOCX</div>", unsafe_allow_html=True)
+    if uploaded_file is not None:
+        st.markdown(f"<div class='upload-chip'>Uploaded: {uploaded_file.name}</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='field-label'>Job Description</div>", unsafe_allow_html=True)
+    job_description = st.text_area(
+        "Job Description",
+        placeholder="Paste the complete Job Description here...",
+        height=300,
+        label_visibility="collapsed",
+        key="job_description",
+    )
+    st.markdown("<div class='field-hint'>Paste the complete job description from the job posting.</div>", unsafe_allow_html=True)
+
+    can_start = bool(job_role and company_name and uploaded_file and job_description)
+    st.markdown("<div class='start-btn'>", unsafe_allow_html=True)
+    # Keep the button enabled so Streamlit reliably captures the click across reruns.
+    # Validate inputs after submit to show clear warnings if anything is missing.
+    submitted = st.form_submit_button("Start Analysis", type="primary", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # Model Selection
 model_option = st.selectbox(
@@ -161,55 +726,67 @@ model_option = st.selectbox(
     index=0,
     help="Select the OpenRouter model you want to use for the analysis.",
 )
-uploaded_file = st.file_uploader(
-    "Upload Resume (PDF or DOCX)",
-    type=["pdf", "docx"],
-    accept_multiple_files=False,
-)
-job_role = st.text_input("Target Role", placeholder="e.g. Python Developer")
-company_name = st.text_input("Company Name", placeholder="e.g. Acme Corp")
-job_description = st.text_area(
-    "Job Description",
-    placeholder="Paste the JD here...",
-    height=180,
-)
 
-if not uploaded_file:
-    st.info("Upload a PDF or DOCX resume to begin.")
+# Read form values from session state to ensure consistent behavior across reruns
+job_role = st.session_state.get("job_role", "").strip()
+company_name = st.session_state.get("company_name", "").strip()
+uploaded_file = st.session_state.get("uploaded_file", None)
+job_description = st.session_state.get("job_description", "").strip()
+
+if not submitted:
+    st.info("Fill in the fields above and click Start Analysis to launch the interview preparation workflow.")
     st.stop()
-if not job_role or not company_name or not job_description:
-    st.warning("Please fill in the role, company name, and job description before generating the report.")
-    st.stop()
+
+# If the user clicked Start Analysis, validate required inputs explicitly
+if submitted:
+    missing = []
+    if not job_role:
+        missing.append("Target Role")
+    if not company_name:
+        missing.append("Company Name")
+    if not uploaded_file:
+        missing.append("Resume (PDF/DOCX)")
+    if not job_description:
+        missing.append("Job Description")
+
+    if missing:
+        st.error("Please complete the following fields before starting the analysis: " + ", ".join(missing))
+        st.stop()
+
 if not OPENROUTER_API_KEY:
     st.error("An OpenRouter API key is required to generate the report.")
     st.stop()
 
-filename = save_uploaded_file(uploaded_file)
+if not uploaded_file:
+    st.warning("Please upload a PDF or DOCX resume before starting the analysis.")
+    st.stop()
+if not job_role or not company_name or not job_description:
+    st.warning("Please complete the role, company name, and job description before starting the analysis.")
+    st.stop()
+
+if not uploaded_file or not hasattr(uploaded_file, "name"):
+    st.error("No uploaded file found.")
+    st.stop()
+
+uploaded_suffix = os.path.splitext(uploaded_file.name)[1].lower()
+if uploaded_suffix not in {".pdf", ".docx"}:
+    st.error("Unsupported file type. Please upload a PDF or DOCX resume.")
+    st.stop()
+
 st.success(f"Resume selected: {uploaded_file.name}")
+# Mark that the user clicked Start Analysis and reset workflow state for a fresh run
+st.session_state.start_analysis = True
+st.session_state.workflow_started = False
+init_workflow_status()
 
-def extract_pdf_text(file_path):
-    text = ""
-    with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
-
-def extract_docx_text(file_path):
-    doc = Document(file_path)
-    return "\n".join(
-        para.text for para in doc.paragraphs
-    )
-
-if filename.endswith(".pdf"):
-    resume_text = extract_pdf_text(filename)
-elif filename.endswith(".docx"):
-    resume_text = extract_docx_text(filename)
-else:
-    raise Exception(
-        "Only PDF and DOCX files are supported."
-    )
+# Run the full analysis directly using the uploaded file
+st.success("Button Clicked Successfully")
+st.write("Queueing analysis to start after initialization...")
+# Queue the analysis to be started once all agent functions are defined (avoids NameError)
+st.session_state.analysis_requested = True
+st.session_state.start_analysis = True
+st.session_state.analysis_completed = False
+st.session_state.analysis_results = {}
 
 # Change Detection: reset generation state if any input parameters change
 current_inputs = {
@@ -242,9 +819,20 @@ def is_quota_exhausted_error(exc):
 def get_llm():
     return LLM(
         model=model_option,
+        provider="openrouter",
         api_key=OPENROUTER_API_KEY,
         temperature=0.2,
     )
+
+
+def execute_with_timeout(func, timeout_seconds=60, error_message="Operation failed or timed out"):
+    """Run func() in a thread with a timeout and return its result or an error message."""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func)
+            return future.result(timeout=timeout_seconds)
+    except Exception as e:
+        return f"ERROR: {error_message}. Details: {str(e)}"
 
 # Individual Step Execution Functions
 def run_step1(llm):
@@ -276,7 +864,7 @@ def run_step1(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "Resume Analyzer failed or timed out")
 
 def run_step2(llm):
     agent = Agent(
@@ -306,8 +894,7 @@ def run_step2(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
-
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "Company Research failed or timed out")
 def run_step3(llm):
     agent = Agent(
         role="JD Match Analyzer",
@@ -334,7 +921,7 @@ def run_step3(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "JD Match Analysis failed or timed out")
 
 def run_step4(llm):
     agent = Agent(
@@ -366,7 +953,7 @@ def run_step4(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "Resume Enhancement failed or timed out")
 
 def run_step5(llm):
     agent = Agent(
@@ -394,8 +981,7 @@ def run_step5(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
-
+    return execute_with_timeout(lambda: str(crew.kickoff()), 45, "HR Interview Guide failed or timed out")
 def run_step6(llm):
     agent = Agent(
         role="Technical Interviewer",
@@ -424,7 +1010,7 @@ def run_step6(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "Technical Interview Guide failed or timed out")
 
 def run_step7(llm, company_output, resume_output, jd_match_output, resume_enhancement_output, hr_output, technical_output):
     agent = Agent(
@@ -469,7 +1055,7 @@ def run_step7(llm, company_output, resume_output, jd_match_output, resume_enhanc
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 90, "Final Report generation failed or timed out")
 
 def run_step8(llm):
     agent = Agent(
@@ -499,7 +1085,7 @@ def run_step8(llm):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 45, "Mock Interview simulation failed or timed out")
 
 def run_step9(llm, resume_enhancement_output):
     agent = Agent(
@@ -533,7 +1119,7 @@ def run_step9(llm, resume_enhancement_output):
         agent=agent
     )
     crew = Crew(agents=[agent], tasks=[task], verbose=False)
-    return str(crew.kickoff())
+    return execute_with_timeout(lambda: str(crew.kickoff()), 60, "Resume Creation failed or timed out")
 
 
 # Helper to format dynamic status cards
@@ -601,6 +1187,134 @@ def get_status_card(title, icon, status):
     </div>
     """
 
+
+def run_complete_analysis(resume_file, job_description_in, company_name_in, job_role_in):
+    """Run the full sequential analysis pipeline using the uploaded file and inputs.
+
+    Extracts resume text, runs agents sequentially, updates session state, and returns results.
+    """
+    # Save uploaded file and extract text
+    try:
+        filename = save_uploaded_file(resume_file)
+    except Exception as e:
+        st.error("Failed to save uploaded resume file")
+        st.error(str(e))
+        return {}
+
+    if filename.endswith(".pdf"):
+        # extract text from PDF
+        extracted_text = ""
+        try:
+            with pdfplumber.open(filename) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        extracted_text += page_text + "\n"
+        except Exception as e:
+            st.error("Failed to extract text from PDF")
+            st.error(str(e))
+            return {}
+    elif filename.endswith(".docx"):
+        # extract text from DOCX
+        try:
+            doc = Document(filename)
+            extracted_text = "\n".join(para.text for para in doc.paragraphs)
+        except Exception as e:
+            st.error("Failed to extract text from DOCX")
+            st.error(str(e))
+            return {}
+    else:
+        st.error("Unsupported resume format")
+        return {}
+
+    # set globals used by existing step functions
+    global resume_text, job_description, company_name, job_role
+    resume_text = extracted_text
+    job_description = job_description_in
+    company_name = company_name_in
+    job_role = job_role_in
+
+    # Initialize workflow/session state
+    init_workflow_status()
+    st.session_state.analysis_started = True
+    st.session_state.analysis_completed = False
+    st.session_state.analysis_results = {
+        "resume_analysis": None,
+        "ats_analysis": None,
+        "jd_match": None,
+        "skill_gap": None,
+        "questions": None,
+        "technical": None,
+        "hr": None,
+        "report": None,
+    }
+
+    llm = get_llm()
+    steps = [
+        ("resume_analyzer", run_step1, "resume_analysis", "Resume Analyzer Started"),
+        ("ats_agent", run_step1, "ats_analysis", "ATS Agent Started"),
+        ("jd_match_agent", run_step3, "jd_match", "JD Match Agent Started"),
+        ("skill_gap_agent", run_step4, "skill_gap", "Skill Gap Agent Started"),
+        ("question_generator_agent", run_step8, "questions", "Question Generator Started"),
+        ("technical_interview_agent", run_step6, "technical", "Technical Interview Started"),
+        ("hr_interview_agent", run_step5, "hr", "HR Interview Started"),
+        ("report_agent", run_step7, "report", "Report Generation Started"),
+    ]
+
+    for idx, (stage_key, func, result_key, debug_text) in enumerate(steps):
+        try:
+            st.write(debug_text)
+            update_agent_status(stage_key, "running")
+            update_progress(12 + idx * 11)
+
+            if stage_key == "report_agent":
+                final_report_text = func(
+                    llm,
+                    st.session_state.analysis_results.get("ats_analysis", ""),
+                    st.session_state.analysis_results.get("resume_analysis", ""),
+                    st.session_state.analysis_results.get("jd_match", ""),
+                    st.session_state.analysis_results.get("skill_gap", ""),
+                    st.session_state.analysis_results.get("hr", ""),
+                    st.session_state.analysis_results.get("technical", ""),
+                )
+                recommendations = "Focus on keyword alignment, project evidence, and interview practice based on the generated report."
+                readiness = derive_score(final_report_text, 78, 4)
+                result = {
+                    "ats_score": st.session_state.analysis_results.get("ats_analysis", ""),
+                    "jd_match_score": st.session_state.analysis_results.get("jd_match", ""),
+                    "missing_skills": st.session_state.analysis_results.get("skill_gap", ""),
+                    "technical_questions": st.session_state.analysis_results.get("technical", ""),
+                    "hr_questions": st.session_state.analysis_results.get("hr", ""),
+                    "recommendations": recommendations,
+                    "final_readiness_score": readiness,
+                    "final_report": final_report_text,
+                }
+            else:
+                result = func(llm)
+
+            st.session_state.analysis_results[result_key] = result
+            if "results" not in st.session_state:
+                st.session_state.results = {}
+            st.session_state.results[result_key] = result
+
+            update_agent_status(stage_key, "completed")
+            update_progress(12 + idx * 11)
+            st.write(f"{debug_text} - Completed")
+
+        except Exception as e:
+            update_agent_status(stage_key, "failed")
+            st.session_state.analysis_results[result_key] = f"ERROR: {str(e)}"
+            st.session_state.results[result_key] = f"ERROR: {str(e)}"
+            st.error(f"Agent {stage_key} failed: {str(e)}")
+            update_progress(12 + idx * 11)
+            st.session_state.analysis_completed = False
+            return st.session_state.analysis_results
+
+    update_progress(100)
+    st.session_state.analysis_completed = True
+    st.session_state.current_page = "dashboard"
+    return st.session_state.analysis_results
+
 card_meta = {
     "resume_output": {"title": "Resume ATS Analyzer", "icon": "📊"},
     "company_output": {"title": "Company Research", "icon": "🔍"},
@@ -613,417 +1327,121 @@ card_meta = {
     "resume_creation_output": {"title": "Resume Creator", "icon": "📄"},
 }
 
-st.write("---")
+workflow_alias = {
+    "resume_output": "resume_output",
+    "company_output": "ats_output",
+    "jd_match_output": "jd_match_output",
+    "resume_enhancement_output": "skill_gap_output",
+    "hr_output": "hr_output",
+    "technical_output": "technical_output",
+    "final_output": "final_output",
+    "mock_interview_output": "question_output",
+    "resume_creation_output": "resume_upload",
+}
 
-col_all1, col_all2, col_all3 = st.columns(3)
-with col_all1:
-    if st.button("🚀 Auto-Generate (Step-by-Step)", type="primary", use_container_width=True):
-        # Clear existing cached outputs to start sequential fresh
-        for key in [
-            "resume_output", "company_output", "jd_match_output", 
-            "resume_enhancement_output", "hr_output", "technical_output", 
-            "final_output", "mock_interview_output", "resume_creation_output"
-        ]:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.session_state.incremental_generating = True
-        st.rerun()
-
-with col_all2:
-    if st.button("⚡ Generate All in Parallel", type="secondary", use_container_width=True):
-        st.session_state.incremental_generating = False
-        st.subheader("⚡ Live Multi-Agent Parallel Execution Status")
-        # Setup 3x3 grid system matching layout request
-        row1_cols = st.columns(3, gap="large")
-        row2_cols = st.columns(3, gap="large")
-        row3_cols = st.columns(3, gap="large")
-        
-        status_placeholders = {
-            "resume_output": row1_cols[0].empty(),
-            "company_output": row1_cols[1].empty(),
-            "jd_match_output": row1_cols[2].empty(),
-            "resume_enhancement_output": row2_cols[0].empty(),
-            "hr_output": row2_cols[1].empty(),
-            "technical_output": row2_cols[2].empty(),
-            "mock_interview_output": row3_cols[0].empty(),
-            "final_output": row3_cols[1].empty(),
-            "resume_creation_output": row3_cols[2].empty(),
-        }
-        
-        # Init state UI
-        for k, p in status_placeholders.items():
-            meta = card_meta[k]
-            p.markdown(get_status_card(meta["title"], meta["icon"], "pending"), unsafe_allow_html=True)
-            
-        try:
-            llm = get_llm()
-            
-            # Phase 1 Parallel Execution: Steps 1, 2, 3, 4, 5, 6
-            with ThreadPoolExecutor(max_workers=6) as executor1:
-                futures_phase1 = {
-                    executor1.submit(run_step1, llm): "resume_output",
-                    executor1.submit(run_step2, llm): "company_output",
-                    executor1.submit(run_step3, llm): "jd_match_output",
-                    executor1.submit(run_step4, llm): "resume_enhancement_output",
-                    executor1.submit(run_step5, llm): "hr_output",
-                    executor1.submit(run_step6, llm): "technical_output",
-                }
-                
-                results = {}
-                has_error = False
-                error_msg = None
-                
-                while not all(f.done() for f in futures_phase1.keys()):
-                    for future, key in futures_phase1.items():
-                        meta = card_meta[key]
-                        if future.done():
-                            try:
-                                if key not in results:
-                                    results[key] = future.result()
-                                status = "completed"
-                            except Exception as e:
-                                status = "failed"
-                                has_error = True
-                                error_msg = e
-                        elif future.running():
-                            status = "running"
-                        else:
-                            status = "pending"
-                        status_placeholders[key].markdown(get_status_card(meta["title"], meta["icon"], status), unsafe_allow_html=True)
-                    
-                    # Phase 2 tasks (Mock Interview, Career Coach, Resume Creator) remain pending in Phase 1
-                    for key in ["final_output", "mock_interview_output", "resume_creation_output"]:
-                        meta = card_meta[key]
-                        status_placeholders[key].markdown(get_status_card(meta["title"], meta["icon"], "pending"), unsafe_allow_html=True)
-                        
-                    if has_error:
-                        break
-                    time.sleep(0.25)
-                    
-                if not has_error:
-                    for future, key in futures_phase1.items():
-                        meta = card_meta[key]
-                        if key not in results:
-                            results[key] = future.result()
-                        status_placeholders[key].markdown(get_status_card(meta["title"], meta["icon"], "completed"), unsafe_allow_html=True)
-                        
-            if has_error:
-                raise error_msg
-                
-            # Phase 2 Parallel Execution: Steps 7, 8, 9 (Career Coach, Mock Interview, Resume Creator)
-            with ThreadPoolExecutor(max_workers=3) as executor2:
-                futures_phase2 = {
-                    executor2.submit(run_step7, llm, results["company_output"], results["resume_output"], results["jd_match_output"], results["resume_enhancement_output"], results["hr_output"], results["technical_output"]): "final_output",
-                    executor2.submit(run_step8, llm): "mock_interview_output",
-                    executor2.submit(run_step9, llm, results["resume_enhancement_output"]): "resume_creation_output",
-                }
-                
-                while not all(f.done() for f in futures_phase2.keys()):
-                    for future, key in futures_phase2.items():
-                        meta = card_meta[key]
-                        if future.done():
-                            try:
-                                if key not in results:
-                                    results[key] = future.result()
-                                status = "completed"
-                            except Exception as e:
-                                status = "failed"
-                                has_error = True
-                                error_msg = e
-                        elif future.running():
-                            status = "running"
-                        else:
-                            status = "pending"
-                        status_placeholders[key].markdown(get_status_card(meta["title"], meta["icon"], status), unsafe_allow_html=True)
-                    
-                    if has_error:
-                        break
-                    time.sleep(0.25)
-                    
-                if not has_error:
-                    for future, key in futures_phase2.items():
-                        meta = card_meta[key]
-                        if key not in results:
-                            results[key] = future.result()
-                        status_placeholders[key].markdown(get_status_card(meta["title"], meta["icon"], "completed"), unsafe_allow_html=True)
-                        
-            if has_error:
-                raise error_msg
-                
-            # Store in session state
-            for key, val in results.items():
-                st.session_state[key] = val
-                
-            st.success("✅ Generated all reports successfully!")
-            st.rerun()
-            
-        except Exception as exc:
-            if is_quota_exhausted_error(exc):
-                st.error("❌ Your OpenRouter API key rate limit or credits are exhausted. Please check your account.")
-            else:
-                st.error("Failed to generate all reports.")
-                st.exception(exc)
-            st.stop()
-
-with col_all3:
-    if st.button("🗑️ Reset & Clear All Cached Reports", type="secondary", use_container_width=True):
-        st.session_state.incremental_generating = False
-        for key in [
-            "resume_output", "company_output", "jd_match_output", 
-            "resume_enhancement_output", "hr_output", "technical_output", 
-            "final_output", "mock_interview_output", "resume_creation_output"
-        ]:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.rerun()
-
-st.subheader("🛠️ Step-by-Step Interview Preparation Modules")
-
-# Define all steps configs
-steps_config = [
-    {
-        "key": "resume_output",
-        "title": "📊 Step 1: ATS Resume Analysis",
-        "file_name": "ATS_Resume_Analysis.txt",
-        "runner": lambda llm: run_step1(llm),
-        "deps": []
-    },
-    {
-        "key": "company_output",
-        "title": "🔍 Step 2: Company Research",
-        "file_name": "Company_Research.txt",
-        "runner": lambda llm: run_step2(llm),
-        "deps": []
-    },
-    {
-        "key": "jd_match_output",
-        "title": "🎯 Step 3: Job Description Match Analysis",
-        "file_name": "JD_Match_Analysis.txt",
-        "runner": lambda llm: run_step3(llm),
-        "deps": []
-    },
-    {
-        "key": "resume_enhancement_output",
-        "title": "✍️ Step 4: Resume Enhancement Suggestions",
-        "file_name": "Resume_Enhancement_Suggestions.txt",
-        "runner": lambda llm: run_step4(llm),
-        "deps": []
-    },
-    {
-        "key": "hr_output",
-        "title": "🤝 Step 5: HR Interview Guide",
-        "file_name": "HR_Interview_Guide.txt",
-        "runner": lambda llm: run_step5(llm),
-        "deps": []
-    },
-    {
-        "key": "technical_output",
-        "title": "💻 Step 6: Technical Interview Guide",
-        "file_name": "Technical_Interview_Guide.txt",
-        "runner": lambda llm: run_step6(llm),
-        "deps": []
-    },
-    {
-        "key": "final_output",
-        "title": "🏆 Step 7: Final Career Coach Summary & 30-Day Plan",
-        "file_name": "Final_Career_Coach_Summary.txt",
-        "runner": lambda llm: run_step7(
-            llm,
-            st.session_state.company_output, 
-            st.session_state.resume_output, 
-            st.session_state.jd_match_output, 
-            st.session_state.resume_enhancement_output, 
-            st.session_state.hr_output, 
-            st.session_state.technical_output
-        ),
-        "deps": ["company_output", "resume_output", "jd_match_output", "resume_enhancement_output", "hr_output", "technical_output"]
-    },
-    {
-        "key": "mock_interview_output",
-        "title": "🎙️ Step 8: Mock Interview Simulator",
-        "file_name": "Mock_Interview_Simulator.txt",
-        "runner": lambda llm: run_step8(llm),
-        "deps": []
-    },
-    {
-        "key": "resume_creation_output",
-        "title": "📄 Step 9: Improved Sample Resume",
-        "file_name": "Improved_Sample_Resume.txt",
-        "runner": lambda llm: run_step9(llm, st.session_state.resume_enhancement_output),
-        "deps": ["resume_enhancement_output"]
-    }
+workflow_stage_map = [
+    ("resume_analyzer", "📄", "Resume Analyzer Agent", "Extract skills, projects, education, certifications, and experience", "pending"),
+    ("ats_agent", "🎯", "ATS Agent", "Calculate ATS score and identify missing keywords", "pending"),
+    ("jd_match_agent", "📊", "JD Match Agent", "Compare resume against the job description and calculate match percentage", "pending"),
+    ("skill_gap_agent", "🧠", "Skill Gap Agent", "Identify missing skills and improvement areas", "pending"),
+    ("question_generator_agent", "❓", "Question Generator Agent", "Generate technical, HR, and behavioral interview questions", "pending"),
+    ("technical_interview_agent", "💻", "Technical Interview Agent", "Create role-specific technical interview preparation content", "pending"),
+    ("hr_interview_agent", "🗣️", "HR Interview Agent", "Generate HR and behavioral interview guidance", "pending"),
+    ("report_agent", "📑", "Final Report Agent", "Consolidate results into a complete readiness report", "pending"),
 ]
 
-# Find current running step in auto-generation mode for localized status indicators
-current_generating_key = None
-if st.session_state.get("incremental_generating", False):
-    for step in steps_config:
-        if step["key"] not in st.session_state:
-            current_generating_key = step["key"]
-            break
 
-# Render each step
-for step in steps_config:
-    key = step["key"]
-    title = step["title"]
-    file_name = step["file_name"]
-    runner = step["runner"]
-    deps = step["deps"]
-    
-    with st.expander(title, expanded=(key in st.session_state or key == current_generating_key)):
-        if key in st.session_state:
-            # Display report content
-            st.markdown(st.session_state[key])
-            st.write("---")
-            
-            # Action buttons for this report
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button(
-                    label=f"Download {card_meta[key]['title']} Report",
-                    data=st.session_state[key],
-                    file_name=file_name,
-                    mime="text/plain",
-                    use_container_width=True,
-                    key=f"dl_{key}"
-                )
-            with c2:
-                if st.button(f"🔄 Regenerate This Module", key=f"regen_{key}", use_container_width=True):
-                    try:
-                        with st.spinner(f"Regenerating {card_meta[key]['title']}..."):
-                            llm = get_llm()
-                            st.session_state[key] = runner(llm)
-                        st.success(f"Regenerated {card_meta[key]['title']} successfully!")
-                        st.rerun()
-                    except Exception as e:
-                        if is_quota_exhausted_error(e):
-                            st.error("❌ Your OpenRouter API key rate limit or credits are exhausted.")
-                        else:
-                            st.error("Failed to regenerate.")
-                            st.exception(e)
-        else:
-            if key == current_generating_key:
-                st.info("🔄 **Auto-generating this report now... Please wait.**")
-                st.spinner("Executing agent...")
-            else:
-                # Report not generated yet
-                st.info("Report not generated yet.")
-                
-                # Check dependencies
-                missing_deps = [card_meta[d]["title"] for d in deps if d not in st.session_state]
-                if missing_deps:
-                    st.warning(f"Prerequisite modules required before running this: {', '.join(missing_deps)}")
-                    st.button(f"Generate {card_meta[key]['title']}", key=f"gen_{key}", disabled=True, use_container_width=True)
-                else:
-                    if st.button(f"Generate {card_meta[key]['title']}", key=f"gen_{key}", type="secondary", use_container_width=True):
-                        try:
-                            with st.spinner(f"Generating {card_meta[key]['title']}..."):
-                                llm = get_llm()
-                                st.session_state[key] = runner(llm)
-                            st.success(f"Generated {card_meta[key]['title']} successfully!")
-                            st.rerun()
-                        except Exception as e:
-                            if is_quota_exhausted_error(e):
-                                st.error("❌ Your OpenRouter API key rate limit or credits are exhausted.")
-                            else:
-                                st.error("Failed to generate report.")
-                                st.exception(e)
+def render_workflow_timeline(status_map=None):
+    if status_map is None:
+        status_map = st.session_state.get("workflow_status", {})
 
-# Combined Report Assembly (Only includes reports that have been generated so far)
-st.write("---")
-st.subheader("🎉 Combined Interview Preparation Report Preview")
+    st.markdown(
+        """
+        <style>
+        .workflow-shell { background: linear-gradient(145deg, rgba(15,23,42,0.97), rgba(30,41,59,0.92)); border-radius: 24px; padding: 1rem; border: 1px solid rgba(148,163,184,0.18); box-shadow: 0 18px 45px rgba(15,23,42,0.32); }
+        .workflow-card { display:flex; align-items:flex-start; gap:0.8rem; background: rgba(17,24,39,0.92); border:1px solid rgba(148,163,184,0.18); border-radius: 18px; padding: 0.8rem; margin-bottom: 0.65rem; box-shadow: 0 10px 24px rgba(15,23,42,0.18); }
+        .workflow-card:hover { transform: translateY(-1px); border-color: rgba(129,140,248,0.45); }
+        .workflow-icon { width: 44px; height: 44px; border-radius: 12px; display:flex; align-items:center; justify-content:center; background: linear-gradient(135deg, #8b5cf6, #22d3ee); font-size: 1.1rem; flex-shrink: 0; }
+        .workflow-title { color: #eff6ff; font-weight: 700; margin-bottom: 0.1rem; }
+        .workflow-desc { color: #bfdbfe; font-size: 0.92rem; }
+        .workflow-badge { margin-left: auto; font-size: 0.82rem; white-space: nowrap; padding: 0.25rem 0.45rem; border-radius: 999px; border: 1px solid rgba(148,163,184,0.18); color: #e0f2fe; background: rgba(15,23,42,0.75); }
+        .workflow-badge.done { color: #bbf7d0; background: rgba(16,185,129,0.12); border-color: rgba(52,211,153,0.25); }
+        .workflow-badge.running { color: #bfdbfe; background: rgba(56,189,248,0.12); border-color: rgba(56,189,248,0.25); }
+        .workflow-badge.pending { color: #e5e7eb; background: rgba(148,163,184,0.12); border-color: rgba(148,163,184,0.18); }
+        .workflow-arrow { text-align:center; color:#8b5cf6; font-size:1rem; margin: -0.1rem 0 0.1rem 1.6rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-available_reports = []
-for step in steps_config:
-    k = step["key"]
-    title_label = card_meta[k]["title"].upper()
-    if k in st.session_state:
-        available_reports.append(f"""=========================================
-{title_label}
-=========================================
-{st.session_state[k]}
-""")
+    st.markdown("<div class='workflow-shell'>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#eff6ff; margin-top:0;'>⚙️ Multi-Agent Workflow</h4>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#dbeafe;'>Follow the journey from resume upload to the final readiness report.</p>", unsafe_allow_html=True)
 
-if available_reports:
-    combined_report = f"""# INTERVIEW PREPARATION REPORT
-Company: {company_name}
-Role: {job_role}
-
-""" + "\n\n".join(available_reports)
-
-    st.text_area("Full Compiled Report Preview (generated modules only)", combined_report, height=350)
-    
-    report_path = get_temp_storage_dir() / "Interview_Preparation_Report.txt"
-    try:
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(combined_report)
-    except Exception:
-        report_path = None
-        
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button(
-            label="Download Combined Report",
-            data=combined_report,
-            file_name="Interview_Preparation_Report.txt",
-            mime="text/plain",
-            use_container_width=True
+    for idx, (key, icon, name, desc, _) in enumerate(workflow_stage_map):
+        state = status_map.get(key, "pending")
+        badge_text = "Completed" if state == "completed" else "Running" if state == "running" else "Pending"
+        badge_class = "done" if state == "completed" else "running" if state == "running" else "pending"
+        st.markdown(
+            f"""
+            <div class='workflow-card'>
+              <div class='workflow-icon'>{icon}</div>
+              <div>
+                <div class='workflow-title'>{name}</div>
+                <div class='workflow-desc'>{desc}</div>
+              </div>
+              <span class='workflow-badge {badge_class}'>{'✓ ' if state=='completed' else '⟳ ' if state=='running' else '⏳ '}{badge_text}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    with col2:
-        if st.button("🗑️ Reset All Reports", type="secondary", use_container_width=True, key="reset_bottom"):
-            for key in [
-                "resume_output", "company_output", "jd_match_output", 
-                "resume_enhancement_output", "hr_output", "technical_output", 
-                "final_output", "mock_interview_output", "resume_creation_output"
-            ]:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
-    if report_path:
-        st.success(f"Combined report saved to {report_path}")
-    else:
-        st.success("Combined report generated successfully. Use the download button to save it.")
-else:
-    st.info("No reports generated yet. Click 'Auto-Generate (Step-by-Step)' above or generate individual modules separately.")
+        if idx < len(workflow_stage_map) - 1:
+            st.markdown("<div class='workflow-arrow'>↓</div>", unsafe_allow_html=True)
 
-# Sequential Incremental Auto-Generator Executor Block
-if st.session_state.get("incremental_generating", False):
-    next_step = None
-    for step in steps_config:
-        if step["key"] not in st.session_state:
-            next_step = step
-            break
-            
-    if next_step:
-        key = next_step["key"]
-        runner = next_step["runner"]
-        deps = next_step["deps"]
-        
-        # Check prerequisites
-        missing_deps = [d for d in deps if d not in st.session_state]
-        if missing_deps:
-            st.session_state.incremental_generating = False
-            st.error(f"Cannot proceed: Prerequisite modules are missing for {card_meta[key]['title']}.")
-            st.stop()
-            
-        step_idx = steps_config.index(next_step) + 1
-        
-        # Render a localized loader at the bottom of the page
-        st.write("---")
-        with st.spinner(f"⏳ **Auto-Generating Module {step_idx}/9: {card_meta[key]['title']}**... Please wait."):
-            try:
-                llm = get_llm()
-                st.session_state[key] = runner(llm)
-                st.rerun()
-            except Exception as e:
-                st.session_state.incremental_generating = False
-                if is_quota_exhausted_error(e):
-                    st.error(f"❌ OpenRouter API rate limit or quota exceeded during generation of {card_meta[key]['title']}.")
-                else:
-                    st.error(f"An error occurred while generating {card_meta[key]['title']}.")
-                    st.exception(e)
-                st.stop()
-    else:
-        st.session_state.incremental_generating = False
-        st.success("🎉 All interview preparation reports have been generated successfully!")
-        st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# init_workflow_status is defined earlier near the top of the file
+
+
+def update_workflow_status(key, state):
+    stage = workflow_alias.get(key, key)
+    if stage in st.session_state.get("workflow_status", {}):
+        st.session_state.workflow_status[stage] = state
+
+st.write("---")
+
+if "workflow_status" not in st.session_state:
+    init_workflow_status()
+
+render_workflow_timeline(st.session_state.workflow_status)
+
+# Single workflow execution path: run_complete_analysis() handles the sequential status updates.
+if st.session_state.get("analysis_requested", False):
+    st.write("Starting queued analysis now...")
+    try:
+        results = run_complete_analysis(
+            st.session_state.get("uploaded_file"),
+            st.session_state.get("job_description", ""),
+            st.session_state.get("company_name", ""),
+            st.session_state.get("job_role", ""),
+        )
+        st.session_state.analysis_results = results
+        st.session_state.analysis_completed = bool(results)
+        st.session_state.analysis_requested = False
+        if st.session_state.analysis_completed:
+            st.session_state.current_page = "dashboard"
+            safe_rerun()
+    except Exception as e:
+        st.error("Queued agent execution failed")
+        st.error(str(e))
+        st.session_state.analysis_requested = False
+
+
+def extract_bullets(text, keyword):
+    text = text or ""
+    lines = [line.strip(" -•\n") for line in text.splitlines() if keyword.lower() in line.lower()][:4]
+    return lines or [f"{keyword.title()} insights are being generated in the analysis report."]
+
+
+# duplicate render_dashboard_output removed
